@@ -274,12 +274,12 @@ routes-cache.json  路线扫描缓存（6 小时）
 - **杀毒软件/公司策略**可能拦住 PowerShell 或证书导入。
 - **轨迹是程序生成的**，不是在操场上真实采集的；服务端只做规则层与打卡点校验。请遵守所在学校的规定。
 
-## 🔗 和其他两个项目的关系
+## 🔗 和其他项目的关系
 
 | 项目 | 角色 |
 |---|---|
-| `sunshine-run-client` | 命令行**测试客户端**：11 个命令、19 个 fuzz 用例、抓包取 token。**协议真源**（未随本仓库发布） |
-| `totoro-paradise` | 另一套后端（龙猫）的网页版，本项目的界面结构参考了它。两者协议不同，代码不通用 |
+| `sunshine-run-client`（同作者的命令行版，**未随本仓库发布**） | 命令行**测试客户端**：11 个命令、19 个 fuzz 用例、抓包取 token。**本项目的协议真源** |
+| [totoro-paradise](https://github.com/Mandingo1010/totoro-paradise) | 另一套后端（龙猫）的网页版。**本项目的界面结构与 Nuxt/Vuetify 配置参考了它**，详见下方致谢 |
 | **本项目** | 上面那套已核实的协议 + 给普通人用的网页界面。只做校园跑，只读诊断 + 演练模式 |
 
 📄 协议说明见 [`docs/PROTOCOL.md`](docs/PROTOCOL.md)。
@@ -289,6 +289,31 @@ routes-cache.json  路线扫描缓存（6 小时）
 
 协议细节、实测结论、以及「服务端到底做了哪些校验」都在
 [`docs/PROTOCOL.md`](docs/PROTOCOL.md)（由同作者的命令行版测试客户端产出，已脱敏）。
+
+---
+
+## 🙏 致谢
+
+### [totoro-paradise](https://github.com/Mandingo1010/totoro-paradise) —— 界面结构与配置写法
+
+本项目是一个**独立实现**（后端协议完全不同，代码不通用），但下面这些地方参考了它：
+
+| 参考了什么 | 在本项目的位置 |
+|---|---|
+| 整体形态：`ssr: false` 的纯前端 SPA + 一键启动脚本 + 图文 README | `nuxt.config.ts`、`启动阳光跑.bat`、本文件 |
+| Vuetify 的接入方式（`vite-plugin-vuetify` 自动按需引入 + `plugins/vuetify.ts` 写法） | `nuxt.config.ts`、`plugins/vuetify.ts` |
+| 页面骨架：`VApp / VAppBar / VMain` + 卡片式布局 | `app.vue`、各页面 |
+| **随机浮动算法**：`(rand-0.5)*0.18`（距离）/ `(rand-0.5)*0.30`（速度） | `server/core/sunshine/jitter.mjs`（文件头有出处标注） |
+
+它的上游原始作者是 [@BeiyanYunYi](https://github.com/BeiyanYunYi/totoro-paradise)，本仓库参考的是 Mandingo1010 维护的分支。
+两者与**本项目**都采用 **AGPL-3.0**，许可证互相兼容。
+
+> ⚠️ 提醒：totoro-paradise 打的是**另一套后端**（龙猫），两边协议完全不同 —— 它的代码不能拿来跑本项目，反之亦然。
+
+### 其他
+
+- 协议实现（`request/api/device/metrics/trackgen/runtrack`）来自同作者的命令行版测试客户端，由 `sync-core.mjs` 保持同步，未做任何改动。
+- 本项目的所有实测结论都记录在 [`docs/PROTOCOL.md`](docs/PROTOCOL.md)。
 
 ## ⚠️ 免责声明
 
