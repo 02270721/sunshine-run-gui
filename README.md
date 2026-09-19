@@ -116,6 +116,9 @@ pnpm core:sync --check # 核心协议实现与命令行版是否还有漂移
 | 8 | 假设 2727 一定可用 | Windows 动态保留端口段 / 上次没退干净的连接会让它 `EACCES` | 启动器逐个试端口，并记住上次成功的端口 |
 | 9 | 用「首页返回 200」验收 SPA | `ssr: false` 时服务器只返回空壳 HTML，白屏也能过 | 用无头浏览器真渲染：`pnpm verify:render` |
 | 10 | 测试里想改后端地址 | `login()` 取的是**凭证文件**里的 `baseUrl`，不是 `config.baseUrl` | 预置一份凭证文件指向假服务器 |
+| 11 | `vite-plugin-vuetify` 用 2.0.1 | 它的 `parseId()` 用 `url.parse()` 解析模块 id，碰到 Nuxt 的虚拟模块 `virtual:nuxt:D:/…` 会在新版 Node 上抛 `Invalid port in url`，**dev 模式整个起不来**（生产构建反而正常，很容易漏掉） | 锁 `2.1.3`（已改成 `id.split('?')`） |
+| 12 | 给 `ssr: false` 的项目配 `build.transpile: ['vuetify']` | Nitro 的 esbuild 报 `The entry point "vuetify" cannot be marked as external` | 删掉；服务端不渲染组件，本来就不需要 |
+| 13 | 以为 `pnpm dev` 会绑 127.0.0.1 | dev 默认只监听 IPv6 `[::1]`，启动器打印的 `http://127.0.0.1:2727` 打不开 | `devServer: { host: '127.0.0.1' }` |
 
 ### 📁 项目结构
 
