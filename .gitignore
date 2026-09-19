@@ -1,0 +1,10 @@
+node_modules
+.nuxt
+.output
+.data
+release
+npm-debug.log*
+pnpm-debug.log*
+debug.log
+*.log
+.DS_Store

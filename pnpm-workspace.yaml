@@ -1,0 +1,5 @@
+# esbuild 的安装脚本需要被允许执行（Vite 用它做转译），否则首次 pnpm install 会停下来问你。
+# 这是 pnpm 11 的构建许可清单；pnpm 9/10 读的是 package.json 里的 pnpm.onlyBuiltDependencies，
+# 两处都写了，用哪个版本都不用手动确认。
+allowBuilds:
+  esbuild: true
