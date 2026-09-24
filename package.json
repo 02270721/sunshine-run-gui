@@ -1,6 +1,6 @@
 {
   "name": "sunshine-run-gui",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "type": "module",
   "description": "酷动·阳光跑 —— 校园跑图形助手（Nuxt3 + Vuetify）",
