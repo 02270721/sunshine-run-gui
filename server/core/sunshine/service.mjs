@@ -71,7 +71,14 @@ export function explainError(e) {
   if (!e) return '未知错误'
   if (e.code === 'NOT_LOGGED_IN') return e.message
   if (e.code === 401 || e.statusCode === 401) return '登录状态已失效（服务端返回 401），请重新做一次接入向导'
-  if (e.code === 403) return '这个账号还没有绑定学号，请先在小程序里绑定学号'
+  if (e.code === 403 || e.statusCode === 403) {
+    // ⚠️ 403 不等于「没绑定学号」。实测：小程序 v29 之后，写接口缺少请求签名
+    // 服务端也返回 403（"请求校验失败，请更新小程序后重试"）。
+    // 所以永远把**服务端原话**放在最前面，免得把真实原因掩盖掉。
+    const raw = String(e.message || '').trim()
+    if (/绑定/.test(raw)) return raw
+    return raw ? `服务端拒绝了这次请求（403）：${raw}` : '服务端拒绝了这次请求（403），但没说明原因'
+  }
   if (e.statusCode === 502) return '学校服务器 502（服务端故障），已尝试回退默认地址'
   return e.message || String(e)
 }

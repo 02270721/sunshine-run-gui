@@ -1,10 +1,10 @@
 {
   "note": "本目录由 scripts/sync-core.mjs 生成，请勿手工修改；要改协议实现请改源项目再同步。",
-  "source": "同作者的命令行版项目 sunshine-run-client/src（未随本仓库发布）",
-  "syncedAt": "2026-09-19T01:43:38.166Z",
+  "source": "D:\\code\\sunshine-run-client\\src",
+  "syncedAt": "2026-09-24T06:56:17.660Z",
   "files": {
-    "request.mjs": "f6b91e8075e9ef321505e1c2f683fef6b28d6e2807770d2be7b5352bd8b2bd3e",
-    "api.mjs": "fa7a8256ac5f13256d0b1616c61d3aca945ceb7559d73e22527ce886fd8762aa",
+    "request.mjs": "9d34409caadf5f65b85e9f388f29df00c9580d4a929440ceeb7a4b35f3e336cf",
+    "api.mjs": "2d679343854c80043b69dc769e43a0eba476dfdd74f31b2b7560d0f01c9dc4b3",
     "device.mjs": "e4e2617fb0adc72a08990b29fb9e39a49da84d4dd81364f02bc0189c04d337b1",
     "metrics.mjs": "ea6f9285eb2c8296e2a96dd2dcad892a7e9fbe8839dae9e6e75b26a8eab9ea18",
     "trackgen.mjs": "a9125faa8b8d14bb2cc6111238b20d1dbee8518a5cccf38083a8698b317eeb0a",

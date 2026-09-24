@@ -130,6 +130,63 @@ function h() {
 
 `deviceId` 存在 `wx.getStorageSync('deviceId')`，**首登生成后终身不变** —— 这就是服务端识别"同一台设备"的依据。
 
+### 2.2 请求签名（小程序 v29 起，2026-09 实测）
+
+服务端对**三个写接口**强制校验签名。不带签名的请求一律返回：
+
+```json
+{ "code": 403, "message": "请求校验失败，请更新小程序后重试" }
+```
+
+| 方法 | 路径 | 要签名 |
+|---|---|---|
+| POST | `/runs` | ✅ |
+| POST | `/runs/sessions/start` | ✅ |
+| POST | `/runs/sessions/{id}/finish` | ✅ |
+| POST | `/runs/sessions/{id}/cancel` | ❌ |
+| 所有 GET | — | ❌ |
+
+要加的三个头：
+
+| 头 | 内容 |
+|---|---|
+| `sunshine-run-timestamp` | 秒级时间戳（**字符串**） |
+| `sunshine-run-nonce` | 16 个随机字节 → 32 位**小写 hex** |
+| `sunshine-run-sign` | `hmacSHA256hex(key, canonical)` |
+
+`canonical` 是 8 行、用 `\n` 连接、**末尾还有一个 `\n`**：
+
+```
+v1
+<方法大写>
+<路径>                      ← 例如 /runs/sessions/start，不含域名
+<timestamp>
+<nonce>
+<sha256hex(token)>
+<sha256hex(deviceId)>
+<sha256hex(请求体 JSON 字符串)>
+```
+
+密钥硬编码在小程序里（64 位 hex）：`11b88c5d08744fdcba39ae5727fd689c7b08bac9876353e79ec223441fb24ea3`
+
+容易踩的点：
+
+1. `sha256()` 与 `hmac()` 都输出 **hex**（小程序用的是 js-sha256，不是 base64）。
+2. 请求体那一路哈希的必须是**实际发出去的那份 JSON 字符串** —— 先序列化一次，再用同一个字符串去算签名，不能算了签名再重新序列化。
+3. `timestamp` / `nonce` 是**每次请求重新生成**的，不是会话级。
+4. 少任何一项，服务端都先拦在 403，**不会**走到业务逻辑（所以 403 不等于"没绑定学号"）。
+
+实测对照（2026-09-24，真实后端）：
+
+```
+正确签名 → POST /runs/sessions/start → code 200，拿到 sessionId
+改坏签名 → code 403「请求校验失败，请更新小程序后重试」
+正确签名 → finish 一个已撤销的会话 → code 500「跑步会话已结束」（业务错误，说明签名已放行）
+```
+
+出处：v29 的 `app-service.js` 里 `C()`（判定哪些 url 要签名）、`D()`（拼 canonical + HMAC）、`U()`（生成 nonce/timestamp）。
+以后小程序再更新，重新解包后优先 diff 这三个函数。
+
 ---
 
 ## 3. 登录链路
