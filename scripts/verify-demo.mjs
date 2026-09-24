@@ -49,6 +49,37 @@ console.log(`\n⑤ 真的开始（${clock()}）—— 这次真的要等 ${plan.
 const started = await call('/api/run/start', { routeId, distanceKm: plan.distanceKm, durationSec: plan.durationSec, jitter: false })
 console.log(`   sessionId=${started.sessionId}  phase=${started.phase}`)
 
+/**
+ * ⑤.5 提前提交回归探针（EARLY_AT=秒 时启用）。
+ *
+ * 这条探针守的是一个真踩过的坑：手动提前提交时，上报的 duration 如果还是原目标值，
+ * 就会被服务端 v29 对账判「作弊」（实测：提前 71 秒交 → 记录作废且删不掉）。
+ * 所以这里强行在不足最低时长时提交一次，必须被拒绝、计时必须继续。
+ */
+const EARLY_AT = process.env.EARLY_AT ? Number(process.env.EARLY_AT) : null
+if (EARLY_AT) {
+  console.log(`\n⑤.5 提前提交探针：等到 ${EARLY_AT}s 时强行点一次「提前提交」`)
+  for (;;) {
+    const st = await call('/api/run/state')
+    if ((st.elapsedSec || 0) >= EARLY_AT || st.phase !== 'waiting') break
+    await sleep(1000)
+  }
+  const before = await call('/api/run/state')
+  const pv = before.submitPreview
+  console.log(`   界面预览：按钮可点=${pv?.allowed} 上报会是 ${pv?.durationText}；不能提交的理由：${(pv?.issues || []).join('；') || '无'}`)
+  const res = await fetch(`${BASE}/api/run/submit`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ force: false }),
+  })
+  const json = await res.json()
+  const after = await call('/api/run/state')
+  console.log(`   强行提交 → ok=${json.ok}  ${json.error || ''}`)
+  console.log(`   提交后状态仍是 ${after.phase}（必须是 waiting：被拒绝，且计时没有中断）`)
+  if (json.ok) throw new Error('提前提交没有被拒绝 —— 这个缺陷又回来了')
+  if (after.phase !== 'waiting') throw new Error(`提前提交把状态改成了 ${after.phase}，会话可能已经脏了`)
+}
+
 let last = ''
 for (;;) {
   const st = await call('/api/run/state')
@@ -62,6 +93,10 @@ for (;;) {
     console.log(`   phase=${st.phase}`)
     console.log(`   服务端返回：${JSON.stringify(st.result)}`)
     if (st.error) console.log(`   说明：${st.error}`)
+    // 上报用时与服务端计时对不上就会被判作弊 —— 这里把它当成硬性失败
+    if (Number(st.result?.status) !== 1) {
+      throw new Error(`记录不是有效状态：${st.result?.invalidReason || st.error || '未知原因'}`)
+    }
     console.log('\n⑦ 运行日志面板内容（网页上原样显示这些）')
     for (const l of st.log) console.log(`   ${l.t.slice(11, 19)} [${l.level}] ${l.text}`)
     break

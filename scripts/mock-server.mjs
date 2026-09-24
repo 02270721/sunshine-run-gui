@@ -126,6 +126,13 @@ const ROUTES = [
 
 // ---------------------------------------------------------------- 校验
 
+/**
+ * ★ v29 对账阈值 —— 服务端会把客户端上报的 duration 和自己记录的会话时长比对，
+ *   差得太多直接判「作弊」（实测：上报 926s / 真实 858s → 作弊；差 4s → 有效）。
+ *   演练后端照抄这个行为：演练的意义就在于提前暴露这类问题，而不是等真账号被记一笔。
+ */
+const DURATION_TOLERANCE_SEC = 10
+
 function checkRules(p) {
   const d = Number(p.distance)
   const t = Number(p.duration)
@@ -333,7 +340,14 @@ const server = http.createServer((req, res) => {
       const elapsed = Math.max(1, Math.round((Date.now() - session.startedAt) / 1000))
       const payload = { ...p, duration: elapsed }
 
-      const err = checkRules(payload) || (STRICT ? checkRoute(payload) : null)
+      // ★ v29 对账：上报的 duration 与真实会话时长对不上 → 作弊（最高优先级）
+      const declared = Number(p.duration) || 0
+      const drift = declared > 0 ? Math.abs(declared - elapsed) : 0
+      const cheat = declared > 0 && drift > DURATION_TOLERANCE_SEC
+
+      const err = (cheat ? `作弊：上报用时 ${declared}s 与服务器记录 ${elapsed}s 相差 ${drift}s` : null)
+        || checkRules(payload)
+        || (STRICT ? checkRoute(payload) : null)
       const cp = checkCheckpoints(p.routeData, session.route.checkpoints, session.route.checkpointHitRadiusM)
       const now = new Date()
       const record = {
@@ -362,7 +376,7 @@ const server = http.createServer((req, res) => {
       sessions.delete(session.id)
 
       const verdict = record.status === 1 ? '\x1b[32m有效\x1b[0m' : `\x1b[31m无效（${record.invalidReason}）\x1b[0m`
-      console.log(`  ${new Date().toLocaleTimeString('zh-CN', { hour12: false })} 提交 ${session.id}  服务端计时 ${elapsed}s  打卡 ${cp.passed}/${cp.total} → ${verdict}`)
+      console.log(`  ${new Date().toLocaleTimeString('zh-CN', { hour12: false })} 提交 ${session.id}  上报 ${declared}s / 服务端计时 ${elapsed}s（差 ${drift}s）  打卡 ${cp.passed}/${cp.total} → ${verdict}`)
       return send(ok(record))
     }
 

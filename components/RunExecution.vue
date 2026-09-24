@@ -6,12 +6,26 @@
  *   1. 现在到哪一步了（阶段时间线）
  *   2. 还剩多久（进度环 + 大字）
  *   3. 关掉页面会不会出问题（明确写「不会」）
+ *
+ * 「提前提交」是这里唯一的危险按钮：服务端 v29 会拿上报的 duration 和会话真实
+ * 经过时间对账，对不上就判「作弊」。所以它必须走二次确认，并且把「会按多少秒上报」
+ * 直接写在按钮上 —— 别让人凭感觉点（实测踩过一次：提前 71 秒交，被判作弊）。
  */
 import type { RunSnapshot } from '~/composables/useRun'
 import { formatDuration } from '~/utils/format'
 
 const props = defineProps<{ state: RunSnapshot, busy?: boolean }>()
 const emit = defineEmits<{ (e: 'submit'): void, (e: 'cancel'): void }>()
+
+const confirmOpen = ref(false)
+const preview = computed(() => props.state.submitPreview || null)
+const targetText = computed(() => formatDuration(props.state.durationSec || 0))
+const earlyText = computed(() => formatDuration(Math.max(0, (props.state.durationSec || 0) - (preview.value?.durationSec || 0))))
+
+function doSubmit() {
+  confirmOpen.value = false
+  emit('submit')
+}
 
 const total = computed(() => props.state.expectedDurationSec || props.state.durationSec || 0)
 const elapsed = computed(() => props.state.elapsedSec || 0)
@@ -77,16 +91,17 @@ const steps = computed(() => {
         </div>
       </VCardText>
       <VDivider />
-      <VCardActions class="justify-center py-3">
+      <VCardActions class="justify-center py-3 flex-wrap ga-2">
         <VBtn
           v-if="state.canSubmitNow"
           color="primary"
           variant="flat"
           prepend-icon="mdi-send-check"
           :loading="busy"
-          @click="emit('submit')"
+          :disabled="!preview?.allowed"
+          @click="confirmOpen = true"
         >
-          立即提交
+          提前提交{{ preview?.allowed ? `（按 ${preview.durationText} 上报）` : '' }}
         </VBtn>
         <VBtn
           v-if="state.canCancel"
@@ -99,7 +114,50 @@ const steps = computed(() => {
           撤销这次跑步
         </VBtn>
       </VCardActions>
+      <VCardText v-if="state.canSubmitNow && !preview?.allowed" class="pt-0 text-center">
+        <span class="text-caption text-warning">
+          现在还不能提交 —— {{ (preview?.issues || []).join('；') }}
+        </span>
+      </VCardText>
     </VCard>
+
+    <!--
+      提前提交的二次确认：把后果说清楚。
+      唯一真正安全的做法是让它自动提交，所以默认按钮是「继续等」。
+    -->
+    <VDialog v-model="confirmOpen" max-width="540">
+      <VCard>
+        <VCardTitle class="text-subtitle-1">确定要提前提交吗？</VCardTitle>
+        <VCardText class="text-body-2">
+          <p>
+            现在提交，上报用时是 <strong>{{ preview?.durationText }}</strong>
+            （原目标 {{ targetText }}），轨迹时间戳会一起压缩到这个时长，
+            保证和服务端记录的自洽。
+          </p>
+          <p class="mb-2">
+            学校服务器按它自己计的时间核对 —— 两边对不上，这条记录会被判<strong>作弊</strong>，而且删不掉。
+          </p>
+          <VAlert
+            v-if="preview?.earlierThanTarget"
+            type="warning"
+            variant="tonal"
+            density="compact"
+            class="mb-2"
+          >
+            比目标提前了 {{ earlyText }}。
+          </VAlert>
+          <VAlert type="success" variant="tonal" density="compact" icon="mdi-shield-check-outline">
+            最稳的做法是<strong>什么都不点</strong>：到点程序会自己提交，关掉网页也不影响。
+            真要中止这次跑步，用「撤销这次跑步」——那样不会有任何记录。
+          </VAlert>
+        </VCardText>
+        <VCardActions>
+          <VSpacer />
+          <VBtn variant="text" @click="confirmOpen = false">继续等（推荐）</VBtn>
+          <VBtn color="warning" variant="flat" :loading="busy" @click="doSubmit">仍然提交</VBtn>
+        </VCardActions>
+      </VCard>
+    </VDialog>
 
     <VAlert type="success" variant="tonal" icon="mdi-check-circle-outline" class="mb-4">
       <strong>现在可以关掉这个页面。</strong>

@@ -234,7 +234,7 @@ routes-cache.json  路线扫描缓存（6 小时）
 | `/api/run/plan` | POST | **干跑预演**：生成轨迹 + 真机算法重放 + 打卡点判定（不发写请求） |
 | `/api/run/start` | POST | 真正开始：建会话 → 生成 → 自检 → 进入等待 |
 | `/api/run/state` | GET | 跑步进度（网页每秒轮询） |
-| `/api/run/submit` | POST | 立即提交（提前交卷 / 重启后接着交） |
+| `/api/run/submit` | POST | 提前提交（`{ force }`）。用**真实经过秒数**重算上报数据；不足学校最低时长时直接拒绝并继续等 |
 | `/api/run/cancel` | POST | 撤销会话（不产生任何记录） |
 | `/api/run/reset` | POST | 清掉已结束的状态 |
 | `/api/records` | GET | 学校服务器上的记录（分页） |

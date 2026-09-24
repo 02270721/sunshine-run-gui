@@ -89,6 +89,19 @@ async function onCancel() {
   }
 }
 
+/**
+ * 提前提交。服务端在「还不到学校最低时长」时会直接拒绝（并继续等），
+ * 所以这里必须把拒绝的理由显示出来，而不是静默失败。
+ */
+async function onSubmit() {
+  error.value = null
+  try {
+    await submitNow(false)
+  } catch (e) {
+    error.value = (e as Error).message
+  }
+}
+
 async function onAgain() {
   await reset()
   await load()
@@ -185,7 +198,7 @@ onMounted(() => {
         v-else-if="view === 'execution'"
         :state="run"
         :busy="busy"
-        @submit="submitNow(false)"
+        @submit="onSubmit"
         @cancel="onCancel"
       />
 

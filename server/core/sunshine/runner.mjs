@@ -105,6 +105,25 @@ export function snapshot() {
     log: state.log || [],
     canSubmitNow: state.phase === 'waiting' || state.phase === 'interrupted',
     canCancel: activePhases().includes(state.phase) || state.phase === 'interrupted',
+    /**
+     * 「现在点提交会怎么样」的预览 —— 给界面用，免得用户凭感觉点。
+     * 提前提交时上报的 duration 是**当前真实经过秒数**（不是原目标值）。
+     */
+    submitPreview: (state.phase === 'waiting' || state.phase === 'interrupted')
+      ? (() => {
+          const issues = checkAgainstRules(state.rules || null, state.distanceKm, elapsedSec)
+          // 重启时如果连轨迹都没生成完，提交上去只会得到一条删不掉的垃圾记录
+          if (!state.payload) issues.unshift({ text: '这次跑步的数据没生成完整，不能提交，只能撤销' })
+          return {
+            durationSec: elapsedSec,
+            durationText: formatDuration(elapsedSec),
+            paceText: formatPace(elapsedSec, state.distanceKm),
+            allowed: issues.length === 0,
+            issues: issues.map((i) => i.text),
+            earlierThanTarget: elapsedSec < state.durationSec,
+          }
+        })()
+      : null,
   }
 }
 
@@ -401,11 +420,56 @@ export async function start({ routeId, distanceKm, durationSec, jitter = false }
 // ---------------------------------------------------------------- 提交 / 撤销
 
 /**
- * 提交（到点自动调用，也可以由用户点「立即提交」提前触发）。
+ * 按真实经过时间重排轨迹的时间戳。
  *
- * 提交前用**真实经过的秒数**再对一次规则：
- * 如果等太久（比如中途电脑休眠）导致超过 maxDuration，就撤销而不是白交一条无效记录 ——
- * 协议里没有删除记录的接口，交上去就删不掉了。
+ * 为什么必须做：轨迹是按**目标时长**生成的，如果提前提交，轨迹里最后几个点的
+ * 时间戳会落在"未来"（比提交时刻还晚），而 payload.duration 也还是目标值。
+ * 服务端 v29 会拿上报的 duration 和会话真实经过时间对账 —— 对不上就判「作弊」。
+ * （实测：上报 926 秒 vs 真实 858 秒 → 作弊；上报 720 vs 真实 724 只差 4 秒 → 有效）
+ *
+ * 坐标不动（里程因此不变），只把所有时间戳均匀压进 [startTime, startTime + duration]。
+ */
+function retimeTrack(routeData, startTime, durationSec) {
+  if (!Array.isArray(routeData) || routeData.length < 2) return routeData
+  const startMs = new Date(startTime).getTime()
+  const dt = (durationSec * 1000) / (routeData.length - 1)
+  return routeData.map((p, i) => ({
+    ...p,
+    timestamp: Math.floor(startMs + i * dt),
+  }))
+}
+
+/**
+ * 按**真实经过时间**重建上报数据。
+ *
+ * 关键：duration 一律用真实经过秒数（不是原目标值）。
+ * 服务端 v29 会拿它和会话真实时长对账，两者相差太大会判「作弊」；
+ * 用真实值最保险（差值只剩我们这边提前计时的零点几秒）。
+ * 坐标不动 → 里程不变；时间戳重排 → 与 duration 自洽。
+ */
+function buildSubmitPayload(elapsedSec) {
+  const p = state.payload || {}
+  const distanceKm = Number(p.distance ?? state.distanceKm) || state.distanceKm
+  const startTime = p.startTime || state.sessionStartedAt
+  return {
+    ...p,
+    duration: Math.round(elapsedSec),
+    distance: Number(Number(distanceKm).toFixed(2)),
+    pace: formatPace(elapsedSec, distanceKm),
+    calories: calcCalories(distanceKm),
+    startTime: formatDateTime(new Date(startTime)),
+    endTime: formatDateTime(new Date(new Date(startTime).getTime() + elapsedSec * 1000)),
+    routeData: retimeTrack(p.routeData, startTime, elapsedSec),
+  }
+}
+
+/**
+ * 提交（到点自动调用，也可以由用户点「提前提交」触发）。
+ *
+ * 两条铁律：
+ *   1. **上报的 duration 必须等于会话真实经过时间** —— 提前提交时按真实值重算
+ *      （duration / pace / calories / 轨迹时间戳），否则会被判「作弊」。
+ *   2. 等太久（比如中途电脑休眠）超过 maxDuration → 撤销，而不是白交一条删不掉的无效记录。
  */
 export async function submit({ force = false } = {}) {
   if (!state) throw new Error('当前没有进行中的跑步')
@@ -419,6 +483,14 @@ export async function submit({ force = false } = {}) {
   const rules = state.rules || null
   const issues = checkAgainstRules(rules, state.distanceKm, elapsedSec)
 
+  /**
+   * 没有 payload 就绝对不能提交 —— 那说明重启时连轨迹都没生成完，
+   * 交上去只会得到一条「协议里没有删除接口」的垃圾记录。
+   */
+  if (!state.payload) {
+    throw new Error('这次跑步的数据没生成完整，不能提交；请点「撤销这次跑步」把它清掉。')
+  }
+
   if (issues.length && !force) {
     const over = issues.some((i) => i.code === 'maxDuration')
     const why = issues.map((i) => i.text).join('；')
@@ -428,15 +500,27 @@ export async function submit({ force = false } = {}) {
       err.issues = issues
       throw err
     }
-    pushLog(`⚠ 提交前校验未通过：${why}`, 'warn')
+    // 太短（提前提交得太多）→ 拒绝，继续等，不要送去被服务端判无效/作弊
+    const err = new Error(`现在还只有 ${formatDuration(elapsedSec)}，${why}。建议再等一会儿，或点「撤销这次跑步」。`)
+    err.issues = issues
+    pushLog(`⛔ 拒绝提前提交：${why}`, 'warn')
+    scheduleSubmit() // 继续按原计划等
+    throw err
   }
 
+  // ★ 按真实经过时间重建 payload：提前提交时上报值与真实值必须一致
+  const payload = buildSubmitPayload(elapsedSec)
+
   state.phase = 'submitting'
-  pushLog(`正在提交（实际经过 ${formatDuration(elapsedSec)}）…`)
+  const early = elapsedSec < state.durationSec
+  pushLog(
+    `正在提交（实际经过 ${formatDuration(elapsedSec)}` +
+    (early ? `，比目标 ${formatDuration(state.durationSec)} 提前，已按真实时长重算上报数据` : '') + '）…',
+  )
   persist()
 
   try {
-    const res = await api.finishRunSession(state.sessionId, state.payload)
+    const res = await api.finishRunSession(state.sessionId, payload)
     state.result = res
     const ok = res && (res.status === 1 || res.status === '1')
     state.phase = ok ? 'done' : 'failed'

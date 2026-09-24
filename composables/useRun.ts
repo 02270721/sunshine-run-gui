@@ -49,6 +49,18 @@ export interface RunSnapshot {
   log?: { t: string, level: string, text: string }[]
   canSubmitNow?: boolean
   canCancel?: boolean
+  /**
+   * 「现在点提交会发生什么」的预览。
+   * 提前提交时上报的 duration 会按真实经过秒数重算，所以必须让用户看见这个数字。
+   */
+  submitPreview?: {
+    durationSec: number
+    durationText: string
+    paceText: string
+    allowed: boolean
+    issues: string[]
+    earlierThanTarget: boolean
+  } | null
 }
 
 let pollTimer: ReturnType<typeof setInterval> | null = null
