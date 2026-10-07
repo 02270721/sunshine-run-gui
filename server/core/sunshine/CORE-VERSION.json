@@ -1,13 +1,14 @@
 {
   "note": "本目录由 scripts/sync-core.mjs 生成，请勿手工修改；要改协议实现请改源项目再同步。",
   "source": "D:\\code\\sunshine-run-client\\src",
-  "syncedAt": "2026-09-24T06:56:17.660Z",
+  "syncedAt": "2026-10-07T08:38:50.492Z",
   "files": {
-    "request.mjs": "9d34409caadf5f65b85e9f388f29df00c9580d4a929440ceeb7a4b35f3e336cf",
+    "request.mjs": "2bbdca4a68e33d0fae02e7ec06fc4804e97a972848757fcd88e16bc7f554a485",
     "api.mjs": "2d679343854c80043b69dc769e43a0eba476dfdd74f31b2b7560d0f01c9dc4b3",
     "device.mjs": "e4e2617fb0adc72a08990b29fb9e39a49da84d4dd81364f02bc0189c04d337b1",
     "metrics.mjs": "ea6f9285eb2c8296e2a96dd2dcad892a7e9fbe8839dae9e6e75b26a8eab9ea18",
     "trackgen.mjs": "a9125faa8b8d14bb2cc6111238b20d1dbee8518a5cccf38083a8698b317eeb0a",
-    "runtrack.mjs": "7e4eb5e94239a6b7a134ade50119e0f2d1a0f97fcf6b8174babb1d68d6a0baea"
+    "runtrack.mjs": "7e4eb5e94239a6b7a134ade50119e0f2d1a0f97fcf6b8174babb1d68d6a0baea",
+    "rules-fallback.mjs": "06238c407447b6f1f8e5b100d169d8968c8cb9af4df6a9d4084bb2aac80391bf"
   }
 }

@@ -9,6 +9,17 @@
 /** GET /api/rules —— 服务端规则，已翻译成人话 */
 export interface RulesInfo {
   known: boolean
+  /** server = 学校下发的；stats = 服务端没下发，按本学期达标标准推导的；none = 彻底读不到 */
+  source?: 'server' | 'stats' | 'none'
+  derived?: boolean
+  standard?: {
+    standardType: string
+    standardLabel?: string | null
+    required?: number | null
+    current?: number | null
+  } | null
+  /** known=false 时给出「为什么」 */
+  reason?: string | null
   semesterName?: string | null
   schoolId?: number | null
   semesterId?: number | null

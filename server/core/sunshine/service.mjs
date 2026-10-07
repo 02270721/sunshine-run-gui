@@ -14,6 +14,7 @@ import path from 'node:path'
 import { createClient, API_BASE_URL } from './request.mjs'
 import { createApi } from './api.mjs'
 import { describeRules } from './rules.mjs'
+import { resolveRunRules, hasRuleFields } from './rules-fallback.mjs'
 import * as store from './store.mjs'
 
 // ---------------------------------------------------------------- 目标后端
@@ -194,13 +195,10 @@ export function authStatus() {
 
 export async function getRules() {
   const { api } = makeApi()
-  let raw = null
-  try {
-    raw = await api.getCurrentRunRule()
-  } catch {
-    raw = null
-  }
-  return describeRules(raw)
+  // 先用服务端下发的规则；读不到就退到本学期达标标准推导（有的学校就是不下发规则，
+  // 实测：某高校 /run-rules/current 返回 {code:200,message:"成功"}，没有 data）。
+  const { rules, source, error } = await resolveRunRules(api)
+  return describeRules(rules, { source, ruleError: source === 'none' ? error : undefined })
 }
 
 /**
@@ -297,7 +295,16 @@ export async function diagnose() {
   for (const [name, fn] of checks) {
     try {
       const data = await fn()
-      results.push({ name, ok: true, brief: JSON.stringify(data ?? null)?.slice(0, 180) ?? 'null' })
+      const empty = data === null || data === undefined
+        || (typeof data === 'object' && !Array.isArray(data) && Object.keys(data).length === 0)
+      results.push({
+        name,
+        ok: true,
+        empty,
+        // 空的规则很容易被误读成"接口挂了"——写清楚它到底返回了什么
+        brief: empty ? `(服务端返回成功，但没有内容${name.includes('run-rules') ? '：该校未配置规则' : ''})`
+          : (JSON.stringify(data ?? null)?.slice(0, 180) ?? 'null'),
+      })
     } catch (e) {
       results.push({
         name,

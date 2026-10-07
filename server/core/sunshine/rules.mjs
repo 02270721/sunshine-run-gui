@@ -78,6 +78,21 @@ export function feasibleDistanceRange(rules, targetPace = DEFAULT_TARGET_PACE) {
 }
 
 /**
+ * 「当前能不能跑」—— 小程序 v30 起，`GET /run-rules/current` 会下发
+ * `runAvailableNow` / `runUnavailableReason`（时段、资格等），小程序在开跑前就拦住。
+ * 字段可能不存在（老版本或学校没配），那时按「不限制」处理。
+ *
+ * @returns {{known:boolean, available:boolean, reason:string}}
+ */
+export function runAvailability(rules) {
+  if (!rules) return { known: false, available: true, reason: '' }
+  const v = rules.runAvailableNow ?? rules.run_available_now
+  const reason = rules.runUnavailableReason ?? rules.run_unavailable_reason ?? ''
+  if (typeof v !== 'boolean') return { known: false, available: true, reason: String(reason) }
+  return { known: true, available: v, reason: String(reason) }
+}
+
+/**
  * 逐条比对规则，返回**给人看**的违规说明（空数组 = 通过）。
  * 每条带 code，前端可以据此定位到具体输入框。
  */
@@ -93,6 +108,12 @@ export function checkAgainstRules(rules, distanceKm, durationSec) {
   const minPace = ruleNum(rules.minPace)
   const maxPace = ruleNum(rules.maxPace)
   const mmss = (s) => `${Math.floor(s / 60)} 分 ${String(Math.round(s % 60)).padStart(2, '0')} 秒`
+
+  // 先看硬门禁：不在可跑时段/没有资格时，后面那些数值算得再准也没用
+  const avail = runAvailability(rules)
+  if (avail.known && !avail.available) {
+    issues.push({ code: 'runUnavailable', text: `当前不可跑步：${avail.reason || '当前不在可跑步时间段'}` })
+  }
 
   if (minD != null && d < minD) {
     issues.push({ code: 'minDistance', text: `里程 ${d.toFixed(2)}km 少于学校要求的 ${minD}km` })
@@ -123,10 +144,31 @@ export function checkAgainstRules(rules, distanceKm, durationSec) {
 
 /**
  * 把规则翻译成「大白话」+ 数值，前端只负责排版。
+ *
+ * @param {any} rules 服务端下发的规则；或 rules-fallback.mjs 推导出来的规则（带 .derived）
+ * @param {{source?:string, ruleError?:string}} [meta]
+ *        source='stats' 表示规则是按达标标准推导的，'none' 表示彻底读不到
  */
-export function describeRules(rules) {
+export function describeRules(rules, meta = {}) {
+  const source = meta.source || (rules?.derived ? 'stats' : rules ? 'server' : 'none')
+
   if (!rules) {
-    return { known: false, lines: ['拿不到学校规则（接口不可用或未登录）'], distanceRange: feasibleDistanceRange(null) }
+    // 实测（2026-10-07，某高校）：服务端对该校不下发规则，
+    // /run-rules/current 返回 {"code":200,"message":"成功"} —— 连 data 都没有。
+    // 小程序遇到这种情况也是放行的（把里程下限当 null），所以这不是"出错"，是"学校没配"。
+    const lines = meta.ruleError
+      ? [`读取学校规则失败：${meta.ruleError}`,
+         '接口没通之前，程序按保守默认值规划（最低 0.5 公里），提交前仍会做轨迹体检。']
+      : ['学校当前没有配置跑步规则（服务端返回成功但没有内容）',
+         '小程序在这种情况下也不限制里程/用时，程序按保守默认值规划。',
+         '若学校本学期有达标要求，请以「跑步记录」页的达标进度为准。']
+    return {
+      known: false,
+      source: 'none',
+      reason: meta.ruleError ? `读取学校规则失败：${meta.ruleError}` : '学校未配置跑步规则（服务端未下发内容）',
+      lines,
+      distanceRange: feasibleDistanceRange(null),
+    }
   }
   const minD = ruleNum(rules.minDistance)
   const minT = ruleNum(rules.minDuration)
@@ -137,23 +179,45 @@ export function describeRules(rules) {
 
   const mmss = (s) => `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, '0')}`
   const lines = []
-  if (minD != null) lines.push(`每次至少跑 ${minD} 公里`)
-  if (minT != null || maxT != null) {
-    lines.push(`用时必须落在 ${minT != null ? mmss(minT) : '?'} ~ ${maxT != null ? mmss(maxT) : '?'} 之间`)
+
+  // 规则是按达标标准推导的 —— 必须说清楚，别让人以为学校真下发了这些要求
+  if (source === 'stats' && rules.derived) {
+    const d = rules.derived
+    lines.push(`服务端没有下发跑步规则，按本学期达标标准推导：每次至少跑 ${minD} 公里`)
+    lines.push(`依据：${d.standardLabel ?? d.standardType}`
+      + (d.required != null ? `（当前 ${d.current ?? '?'}/${d.required}）` : ''))
+    lines.push('用时 / 配速：学校未下发，不做限制（程序按常规慢跑配速规划）')
+    lines.push(`能选的距离：${range.minKm.toFixed(1)} ~ ${range.maxKm.toFixed(1)} 公里`
+      + `（下限来自达标标准，上限是程序默认值、不是学校要求）`)
+  } else {
+    if (minD != null) lines.push(`每次至少跑 ${minD} 公里`)
+    if (minT != null || maxT != null) {
+      lines.push(`用时必须落在 ${minT != null ? mmss(minT) : '?'} ~ ${maxT != null ? mmss(maxT) : '?'} 之间`)
+    }
+    if (minPace != null && maxPace != null) {
+      lines.push(`速度 ${(3600 / maxPace).toFixed(1)} ~ ${(3600 / minPace).toFixed(1)} km/h（不能太快也不能太慢）`)
+    }
+    lines.push(`能选的距离：${range.minKm.toFixed(1)} ~ ${range.maxKm.toFixed(1)} 公里`)
+    if (range.recommendMaxKm < range.maxKm) {
+      lines.push(`按正常慢跑配速（${mmss(DEFAULT_TARGET_PACE)}/km），实际最多 ${range.recommendMaxKm.toFixed(1)} 公里`)
+    }
   }
-  if (minPace != null && maxPace != null) {
-    lines.push(`速度 ${(3600 / maxPace).toFixed(1)} ~ ${(3600 / minPace).toFixed(1)} km/h（不能太快也不能太慢）`)
-  }
-  lines.push(`能选的距离：${range.minKm.toFixed(1)} ~ ${range.maxKm.toFixed(1)} 公里`)
-  if (range.recommendMaxKm < range.maxKm) {
-    lines.push(`按正常慢跑配速（${mmss(DEFAULT_TARGET_PACE)}/km），实际最多 ${range.recommendMaxKm.toFixed(1)} 公里`)
+
+  const avail = runAvailability(rules)
+  if (avail.known && !avail.available) {
+    lines.unshift(`⚠ 当前不可跑步：${avail.reason || '当前不在可跑步时间段'}`)
   }
 
   return {
     known: true,
+    source,
+    derived: Boolean(rules.derived),
+    standard: rules.derived ?? null,
     semesterName: rules.semesterName ?? null,
     schoolId: rules.schoolId ?? null,
     semesterId: rules.semesterId ?? null,
+    runAvailable: avail.known ? avail.available : null,
+    runUnavailableReason: avail.reason || null,
     minDistanceKm: minD,
     minDurationSec: minT,
     maxDurationSec: maxT,

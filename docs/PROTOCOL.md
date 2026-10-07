@@ -4,9 +4,11 @@
 > 其余内容（请求/响应结构、实测数值、结论）保持原样。
 > 它由同作者的命令行版测试客户端产出，随本仓库一起提供，方便对照阅读代码。
 
-> 依据：微信小程序包 `__APP__.wxapkg` 解包后的 `app-service.js`（538 KB，webpack 打包，未加密）。
+> 依据：微信小程序包 `__APP__.wxapkg` 解包后的 `app-service.js`。
+> **版本基线：v30**（2026-10-07 解包，550,646 B；v30 恢复了可读导出名，签名相关代码已逐行复核）。
 > 本文所有结论均可回溯到该文件中的具体模块，关键处标注了原文片段。
-> 与 totoro-paradise 那类"协议重放"不同，**这套后端没有任何加密或签名**，是普通的 REST + 自定义 token 头。
+> 与 totoro-paradise 那类"协议重放"不同，这套后端**负载不加密**，但从 v29 起对三个写接口
+> 强制校验 HMAC-SHA256 签名（见 §2.2）；其余是普通的 REST + 自定义 token 头。
 
 ---
 
@@ -19,7 +21,7 @@
 | 文件上传根 | `https://sports.sqcoe.com/schoolServer`（`SCHOOL_SERVER_BASE_URL`，仅用于 `/api/attachment/upload`） |
 | 传输 | 明文 JSON（`Content-Type: application/json`） |
 | 鉴权 | 自定义头 `sunshine-run`，**不是** `Authorization: Bearer` |
-| 加密/签名 | **无**（全文无 RSA/AES/HMAC/sign 相关代码） |
+| 加密/签名 | 业务负载不加密；**三个写接口有 HMAC-SHA256 请求签名**（v29 起，见 §2.2） |
 | 响应信封 | `{ code, message, data }` |
 | 成功判定 | HTTP 200 **且** `code === 200 \|\| code === 0` |
 | 坐标系统 | GCJ-02（`wx.getLocation({ type: 'gcj02' })`） |
@@ -130,7 +132,7 @@ function h() {
 
 `deviceId` 存在 `wx.getStorageSync('deviceId')`，**首登生成后终身不变** —— 这就是服务端识别"同一台设备"的依据。
 
-### 2.2 请求签名（小程序 v29 起，2026-09 实测）
+### 2.2 请求签名（小程序 v29 起，v30 逐行复核；2026-09 实测）
 
 服务端对**三个写接口**强制校验签名。不带签名的请求一律返回：
 
@@ -176,16 +178,21 @@ v1
 3. `timestamp` / `nonce` 是**每次请求重新生成**的，不是会话级。
 4. 少任何一项，服务端都先拦在 403，**不会**走到业务逻辑（所以 403 不等于"没绑定学号"）。
 
-实测对照（2026-09-24，真实后端）：
+实测对照（2026-09-24 真实后端；2026-10-07 又用 v30 复测过一次）：
 
 ```
 正确签名 → POST /runs/sessions/start → code 200，拿到 sessionId
 改坏签名 → code 403「请求校验失败，请更新小程序后重试」
 正确签名 → finish 一个已撤销的会话 → code 500「跑步会话已结束」（业务错误，说明签名已放行）
+
+2026-10-07 复测（routeId 故意填不存在的值，不产生任何记录）：
+  带签名   → code 500「路线不存在或未启用」   ← 签名已放行，剩下的是业务错误
+  不带签名 → code 403「请求校验失败，请更新小程序后重试」
 ```
 
 出处：v29 的 `app-service.js` 里 `C()`（判定哪些 url 要签名）、`D()`（拼 canonical + HMAC）、`U()`（生成 nonce/timestamp）。
-以后小程序再更新，重新解包后优先 diff 这三个函数。
+v30（2026-10-07）这三个函数恢复可读名 —— `requiresRunSign()` / `calculateRunSign()` / `createRunSignHeaders()`，
+逐字比对**与 v29 完全相同**，密钥也未轮换。以后小程序再更新，重新解包后优先 diff 这三个函数。
 
 ---
 
@@ -504,17 +511,17 @@ this.calories = Math.floor(60 * t);
 | 提交方式 | 立即提交（自由跑）/ 等满时长（阳光跑） | 会话式：start → finish |
 | 反作弊 | 服务端时序校验（不能提交未来时间） | 客户端 `RunTrack` 过滤 + 服务端复算（强度未知） |
 
-**结论：本项目的协议比 totoro 简单一个数量级** —— 没有加密、没有签名、没有时序谜题，
-唯一的门槛是 token 获取和轨迹合理性。
+**结论：本项目的协议本身不复杂** —— 负载不加密、没有时序谜题，
+唯一的门槛是 token 获取、**三个写接口的 HMAC 签名**（§2.2）和轨迹合理性。
 
 ---
 
 ## 10. 端点总表
 
-完整清单（32 个端点，含方法、路径、导出名、是否显示 loading）见
-[`wxapkg-unpack/API-INVENTORY.md`](../wxapkg-unpack/API-INVENTORY.md)，由
-[`wxapkg-unpack/inventory.mjs`](../wxapkg-unpack/inventory.mjs) 从 `app-service.js` 自动生成，可用
-`node inventory.mjs --write` 重新产出。
+完整清单（v30：24 个字面量端点 + 10 条运行时拼接的模板路径，含方法、路径、导出名、是否显示 loading）
+由同作者的命令行版项目 `sunshine-run-client` 生成：`wxapkg-unpack/API-INVENTORY.md`
+（随本仓库发布的只有本目录这一份说明，那个清单不在本包里），生成命令
+`node inventory.mjs out-v30 --write`。
 
 分组一览：
 
@@ -571,6 +578,28 @@ this.calories = Math.floor(60 * t);
 
 > ⚠️ 这套规则**每个学校、每个学期可能不同**（响应里带 `schoolId`/`semesterId`），
 > 不要把它当常量写死，运行时拉一次。
+
+### ⚠️ 规则可能**根本不存在**（2026-10-07 实测）
+
+同一学校（`schoolId=1`）、同一学期（`semesterId=2`），9/18 时上面那份规则还能拿到，
+10/07 再拉只剩一个空信封：
+
+```json
+{ "code": 200, "message": "成功", "timestamp": "2026-10-07T16:33:01.22104969" }
+```
+
+**连 `data` 都没有** —— 服务端对该校不再下发规则。它不是 401/403 也不是超时，
+所以很容易被误读成"接口不可用"。实测排除：请求姿势没变（小程序 v27/v29/v30 都是同一个裸 GET）、
+带 `schoolId` / `semesterId` / `dateType` 也都一样空、账号与学期都正常
+（`/auth/check` = true，`/run-exemptions/current` 明确返回 `semesterId=2`，`/stats` 有达标数据）。
+
+小程序自己遇到这种情况是**放行**的（里程下限当 `null`，`runAvailableNow` 默认 true）。
+本程序的处理：
+
+1. 规则为空时退到 `/stats` 的达标标准推导**唯一有据可依的约束**
+   （`RUN_COUNT_2KM` + `standardValue=22` ⇒ 每次至少 2 公里）；
+2. 时长 / 配速不臆造；
+3. 校园跑设置页的里程与用时改成**手动填写**（滑杆的上下限本来就来自规则，规则没有就没有区间）。
 
 ### 对测试客户端的含义
 

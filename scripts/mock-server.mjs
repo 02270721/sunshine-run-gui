@@ -19,6 +19,7 @@
  */
 
 import http from 'node:http'
+import crypto from 'node:crypto'
 
 // ---------------------------------------------------------------- 参数
 
@@ -31,6 +32,42 @@ const PORT = Number(argOf('--port', 8898))
 /** --fast 只在开发时用：把规则压缩到几十秒，方便快速验证一遍流程 */
 const FAST = argv.includes('--fast')
 const STRICT = argv.includes('--strict')
+/** v29 起真实服务端对三个写接口校验签名；--no-sign 可关掉（用来演示不签名会被拒） */
+const SIGN_ENFORCE = !argv.includes('--no-sign')
+
+// ---------------------------------------------------------------- 请求签名（服务端侧独立实现）
+// 刻意不复用 core/sunshine/request.mjs 的 signHeaders —— 那是**客户端**实现，
+// 拿它来验自己等于没验。这里按 v30 `calculateRunSign` 的原文另写一份。
+const RUN_SIGN_KEY = '11b88c5d08744fdcba39ae5727fd689c7b08bac9876353e79ec223441fb24ea3'
+const SIGN_FAIL = '请求校验失败，请更新小程序后重试'
+const sha256hex = (s) => crypto.createHash('sha256').update(String(s), 'utf8').digest('hex')
+
+/** v30 模块 730 `requiresRunSign` 原文覆盖的三个写接口 */
+function requiresRunSign(method, path) {
+  return String(method).toUpperCase() === 'POST'
+    && (path === '/runs' || path === '/runs/sessions/start'
+      || /^\/runs\/sessions\/[0-9]+\/finish$/.test(path))
+}
+
+/**
+ * 用**收到的原始 body 字符串**复算签名（服务端就是这么算的，不能重新序列化）。
+ * @returns {string|null} 失败原因，null 表示通过
+ */
+function verifyRunSign(req, path, rawBody) {
+  const ts = req.headers['sunshine-run-timestamp']
+  const nonce = req.headers['sunshine-run-nonce']
+  const sign = req.headers['sunshine-run-sign']
+  if (!ts || !nonce || !sign) return SIGN_FAIL
+  const p = path.startsWith('/sunshine') ? path.slice('/sunshine'.length) : path
+  const canonical = [
+    'v1', req.method.toUpperCase(), p, String(ts), String(nonce),
+    sha256hex(req.headers['sunshine-run'] || ''),
+    sha256hex(req.headers['sunshine-run-device-id'] || ''),
+    sha256hex(rawBody),
+  ].join('\n') + '\n'
+  const want = crypto.createHmac('sha256', RUN_SIGN_KEY).update(canonical, 'utf8').digest('hex')
+  return want === sign ? null : SIGN_FAIL
+}
 
 /**
  * 规则与真实后端**完全一致**（实测值：某高校 2026 秋季学期）。
@@ -246,6 +283,15 @@ const server = http.createServer((req, res) => {
 
     if (!req.headers['sunshine-run'] && path !== '/sunshine/auth/check') return send(bad('未授权', 401))
 
+    // 签名闸门 —— 与真实后端一致，只拦三个写接口，且用原始 body 复算
+    if (SIGN_ENFORCE && requiresRunSign(req.method, path)) {
+      const why = verifyRunSign(req, path, body)
+      if (why) {
+        console.log(`  ${new Date().toLocaleTimeString('zh-CN', { hour12: false })} ${req.method} ${path} → \x1b[31m403 ${why}\x1b[0m`)
+        return send(bad(why, 403))
+      }
+    }
+
     if (path === '/sunshine/auth/check') return send(ok(true))
     if (path === '/sunshine/users/profile') return send(ok(USER))
     if (path === '/sunshine/users/run-settings') {
@@ -314,7 +360,9 @@ const server = http.createServer((req, res) => {
       if (!route) return send(bad('路线不存在或未启用'))
       if (p.runType !== 'CAMPUS') return send(bad('演练后端只实现 CAMPUS'))
 
-      const sessionId = `mock-${seq++}`
+      // 真实后端的 sessionId 是纯数字（签名覆盖面里的 finish 正则就是 [0-9]+），
+      // 演练后端也照做，否则 finish 会因为 id 非数字而绕过签名校验。
+      const sessionId = String(10000 + seq++)
       sessions.set(sessionId, {
         id: sessionId,
         routeId: route.id,
@@ -396,6 +444,7 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log(`
 演练后端已启动   http://127.0.0.1:${PORT}/sunshine
 规则模式：${FAST ? '\x1b[33m快速（开发用，一次跑步约 2 分钟）\x1b[0m' : STRICT ? '真实规则 + 点级校验' : '真实规则（与学校服务器一致）'}
+签名校验：${SIGN_ENFORCE ? '\x1b[32m开启\x1b[0m（POST /runs、/runs/sessions/start、/*/finish，与真实后端一致）' : '\x1b[33m关闭（--no-sign）\x1b[0m'}
 可用路线：${ROUTES.map((r) => `${r.id} ${r.name}（${r.checkpoints.length} 打卡点 / 单圈 ${r.lapMeters}m）`).join('、')}
 
 在网页上把「演练模式」打开即可，不需要手动跑这个脚本。

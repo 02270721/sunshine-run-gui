@@ -33,6 +33,7 @@ const { haversineMeters, polylineLengthMeters, formatPace, calcCalories, formatD
 const { generateTrack, verifyTrack, verifyCheckpoints, normalizeRoutePoints, DEFAULT_TRACK_OPTIONS } = await import(core('trackgen.mjs'))
 const { simulateTrack } = await import(core('runtrack.mjs'))
 const { feasibleDistanceRange, checkAgainstRules, planRun, describeRules, durationWindow, DEFAULT_TARGET_PACE } = await import(core('rules.mjs'))
+const { hasRuleFields, deriveRulesFromStandards, resolveRunRules } = await import(core('rules-fallback.mjs'))
 const { applyJitter } = await import(core('jitter.mjs'))
 const store = await import(core('store.mjs'))
 
@@ -168,6 +169,59 @@ const described = describeRules(RULES)
 check('规则能翻译成人话', described.known && described.lines.length >= 3 && described.lines[0].includes('至少'))
 check('拿不到规则时不崩', describeRules(null).known === false)
 
+// ---- v30 新增的「当前能不能跑」门禁（runAvailableNow / runUnavailableReason）
+
+const RULES_UNAVAILABLE = { ...RULES, runAvailableNow: false, runUnavailableReason: '当前不在可跑步时间段（测试）' }
+check('runAvailableNow=false 会拦住开跑',
+  checkAgainstRules(RULES_UNAVAILABLE, 2, 720).some((i) => i.code === 'runUnavailable'))
+check('不可跑时说明里带上服务端给的原因',
+  checkAgainstRules(RULES_UNAVAILABLE, 2, 720).some((i) => i.text.includes('当前不在可跑步时间段')))
+check('字段缺失时不拦（兼容老版本/未配置的学校）',
+  !checkAgainstRules(RULES, 2, 720).some((i) => i.code === 'runUnavailable'))
+check('runAvailableNow=true 不拦',
+  !checkAgainstRules({ ...RULES, runAvailableNow: true }, 2, 720).some((i) => i.code === 'runUnavailable'))
+// 后端两种命名风格都要认（小程序用 pickRuleField 同时兼容 camelCase / snake_case）
+check('下划线风格 run_available_now 也认',
+  checkAgainstRules({ ...RULES, run_available_now: false }, 2, 720).some((i) => i.code === 'runUnavailable'))
+check('describeRules 把「当前不可跑步」顶到第一行',
+  (describeRules(RULES_UNAVAILABLE).lines[0] || '').includes('当前不可跑步'))
+check('可用性字段进入 describeRules 返回值',
+  describeRules(RULES_UNAVAILABLE).runAvailable === false
+  && describeRules(RULES).runAvailable === null)
+
+// ---- 规则读不到时的兜底（实测 2026-10-07：某高校 /run-rules/current 返回成功但无 data）
+
+check('hasRuleFields：空响应/空对象都算「没下发规则」',
+  !hasRuleFields(undefined) && !hasRuleFields(null) && !hasRuleFields({})
+  && !hasRuleFields({ minDistance: null }) && hasRuleFields({ minDistance: 2 }))
+
+const DERIVED = deriveRulesFromStandards({
+  currentSemesterName: '2026 秋季学期',
+  standards: [{ id: 17, label: '有效跑步 >= 22次（按单程标准）', standardType: 'RUN_COUNT_2KM', standardValue: 22, currentValue: 22 }],
+})
+check('从 RUN_COUNT_2KM 推导出「每次至少 2 公里」', DERIVED?.minDistance === 2, JSON.stringify(DERIVED))
+check('推导只给里程下限，不臆造时长/配速',
+  DERIVED.minDuration === undefined && DERIVED.maxDuration === undefined
+  && DERIVED.minPace === undefined && DERIVED.maxPace === undefined)
+check('标准类型不认识就返回 null（不乱猜）',
+  deriveRulesFromStandards({ standards: [{ standardType: 'SOMETHING_ELSE' }] }) === null
+  && deriveRulesFromStandards({ standards: [] }) === null)
+
+const describedDerived = describeRules(DERIVED, { source: 'stats' })
+check('推导出来的规则照样 known=true 并且自报 derived',
+  describedDerived.known === true && describedDerived.derived === true && describedDerived.source === 'stats')
+check('说明里点明「按达标标准推导」并带达标进度',
+  describedDerived.lines[0].includes('达标标准') && describedDerived.lines.join(' ').includes('22/22'))
+check('推导后默认规划 2km（不再规划 0.5km 那种不计入有效次数的记录）',
+  planRun({ rules: DERIVED }).distanceKm === 2, String(planRun({ rules: DERIVED }).distanceKm))
+check('低于推导下限时按 minDistance 报错', checkAgainstRules(DERIVED, 1, 600).some(i => i.code === 'minDistance'))
+
+const describedNone = describeRules(null, { source: 'none' })
+check('彻底读不到时说「学校未配置」而不是「接口不可用」',
+  describedNone.known === false && /未配置/.test(String(describedNone.reason)), String(describedNone.reason))
+check('接口真的报错时把错误原文带出来',
+  /超时/.test(String(describeRules(null, { source: 'none', ruleError: '连接超时' }).reason)))
+
 // ---------------------------------------------------------------- 5. 随机浮动
 
 let jitterOk = 0
@@ -184,6 +238,67 @@ check('200 次浮动全部仍在规则内', jitterOk === 200, `${jitterOk}/200`)
 const tight = applyJitter(2, 480, { rules: RULES })
 check('贴着边界时浮动结果依然合法', checkAgainstRules(RULES, tight.distanceKm, tight.durationSec).length === 0,
   `${tight.distanceKm}km/${tight.durationSec}s`)
+
+// ---------------------------------------------------------------- 5.5 请求签名（v30）
+
+const { signHeaders, canonicalString, requiresRunSign, RUN_SIGN_KEY } = await import(core('request.mjs'))
+
+check('签名只覆盖三个写接口（v30 requiresRunSign 原文）',
+  requiresRunSign('POST', '/runs')
+  && requiresRunSign('POST', '/runs/sessions/start')
+  && requiresRunSign('POST', '/runs/sessions/7/finish')
+  && requiresRunSign('post', '/runs/sessions/12/finish')
+  && !requiresRunSign('POST', '/runs/sessions/7/cancel')
+  && !requiresRunSign('POST', '/runs/sessions/abc/finish')
+  && !requiresRunSign('GET', '/runs')
+  && !requiresRunSign('POST', '/users/run-settings'))
+
+{
+  const c = canonicalString({
+    method: 'post', url: '/runs/sessions/start',
+    token: 'tok', deviceId: 'dev_x', timestamp: '1770000000',
+    nonce: '0123456789abcdef0123456789abcdef', bodyString: '{"a":1}',
+  })
+  const lines = c.endsWith('\n') ? c.slice(0, -1).split('\n') : []
+  check('canonical 是 8 行 + 末尾换行', lines.length === 8 && !c.includes('\r'), JSON.stringify(c))
+  check('canonical 前 5 行为字面量且方法大写',
+    lines[0] === 'v1' && lines[1] === 'POST' && lines[2] === '/runs/sessions/start'
+    && lines[3] === '1770000000' && lines[4] === '0123456789abcdef0123456789abcdef')
+  check('canonical 末 3 行是 sha256 hex', lines.slice(5).every((l) => /^[0-9a-f]{64}$/.test(l)))
+}
+
+{
+  // 固定向量：由 wxapkg-unpack/verify-sign-v30.mjs 用**小程序包自带的 js-sha256** 独立算出。
+  // ⚠️ token / deviceId 必须是合成值 —— 这个向量要提交进仓库，不能带任何真实凭证。
+  const h = signHeaders({
+    method: 'POST', url: '/runs/sessions/start',
+    token: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+    deviceId: 'dev_synthetic0deadbeefcafe',
+    bodyString: '{"runType":"CAMPUS","routeId":2,"startLatitude":31.230416,"startLongitude":121.473701}',
+    timestamp: '1770000000',
+    nonce: '0123456789abcdef0123456789abcdef',
+  })
+  check('固定向量与小程序包内 js-sha256 结果一致',
+    h['sunshine-run-sign'] === '8bbde8675159c6e26b35ef9d8d918ea9e72440390fa0bec70f4a6635e9d82d29',
+    h['sunshine-run-sign'])
+  check('三个头名字正确',
+    h['sunshine-run-timestamp'] === '1770000000' && h['sunshine-run-nonce'].length === 32)
+}
+
+check('密钥是 v30 那把 64 位 hex（未轮换）',
+  RUN_SIGN_KEY === '11b88c5d08744fdcba39ae5727fd689c7b08bac9876353e79ec223441fb24ea3')
+
+{
+  const args = { method: 'POST', url: '/runs', token: 't', deviceId: 'd', bodyString: '{}' }
+  const a = signHeaders(args)
+  const b = signHeaders(args)
+  check('timestamp 是秒级、nonce 是 32 位小写 hex', /^\d{10}$/.test(a['sunshine-run-timestamp']) && /^[0-9a-f]{32}$/.test(a['sunshine-run-nonce']))
+  check('每次请求都换 nonce（签名随之改变）', a['sunshine-run-nonce'] !== b['sunshine-run-nonce'] && a['sunshine-run-sign'] !== b['sunshine-run-sign'])
+  const fixed = { ...args, timestamp: '1770000000', nonce: '0'.repeat(32) }
+  check('body 文本变了签名必变',
+    signHeaders({ ...fixed, bodyString: '{"distance":3}' })['sunshine-run-sign']
+    !== signHeaders({ ...fixed, bodyString: '{"distance":3.0}' })['sunshine-run-sign'])
+}
 
 // ---------------------------------------------------------------- 6. 落盘
 

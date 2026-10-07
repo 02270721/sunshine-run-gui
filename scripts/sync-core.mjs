@@ -32,12 +32,13 @@ const SOURCE_DIR = process.env.SUNSHINE_CORE_SRC
 
 /** 需要同步的文件 —— 只搬协议实现，不搬 CLI / fuzz / 抓包那一套。 */
 const FILES = [
-  'request.mjs',   // 请求层：头部注入、响应信封、401/403/502 处理
-  'api.mjs',       // 端点封装（32 个，全部已核实）
+  'request.mjs',   // 请求层：头部注入、HMAC 签名、响应信封、401/403/502 处理
+  'api.mjs',       // 端点封装（对照 v30 端点清单）
   'device.mjs',    // 设备身份 + FNV-1a 指纹（原样复刻小程序）
   'metrics.mjs',   // Haversine / 配速 / 卡路里 / 时间格式
   'trackgen.mjs',  // 轨迹生成 + 参数体检 + 打卡点判定 + GCJ-02
   'runtrack.mjs',  // RunTrack 状态机逐句复刻（提交前的重放验证）
+  'rules-fallback.mjs', // 服务端不下发规则时的兜底推导（依据本学期达标标准）
 ];
 
 const CHECK_ONLY = process.argv.includes('--check');

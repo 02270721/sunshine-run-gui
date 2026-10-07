@@ -28,6 +28,15 @@ const mmss = (s?: number | null) => (s == null ? '—' : `${Math.floor(s / 60)}:
       </div>
 
       <template v-else-if="rules?.known">
+        <VAlert
+          v-if="rules.derived"
+          type="info"
+          variant="tonal"
+          density="compact"
+          class="mb-3"
+        >
+          该校本学期未下发跑步规则，下面的里程下限是<b>按本学期达标标准推导</b>的，不是学校给的区间。
+        </VAlert>
         <ul class="rule-lines">
           <li v-for="line in rules.lines" :key="line">{{ line }}</li>
         </ul>
@@ -40,8 +49,11 @@ const mmss = (s?: number | null) => (s == null ? '—' : `${Math.floor(s / 60)}:
         </div>
       </template>
 
-      <VAlert v-else type="warning" variant="tonal" density="compact" class="mb-0">
-        读不到学校规则（接口不可用或还没接入）。可以先完成「接入向导」。
+      <VAlert v-else type="info" variant="tonal" density="compact" class="mb-0">
+        <div class="font-weight-medium mb-1">{{ rules?.reason || '学校未配置跑步规则' }}</div>
+        <ul class="rule-lines mb-0">
+          <li v-for="line in (rules?.lines || [])" :key="line">{{ line }}</li>
+        </ul>
       </VAlert>
     </VCardText>
   </VCard>

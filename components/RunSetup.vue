@@ -1,9 +1,16 @@
 <script setup lang="ts">
 /**
- * 校园跑设置 —— 选路线、定里程与用时，并**实时预演**一遍。
+ * 校园跑设置 —— 选路线、**手填**里程与用时，并实时预演一遍。
+ *
+ * 为什么是手填而不是滑杆（2026-10-07 改）：
+ *   滑杆的上下限来自学校规则。而实测有的学校/学期**根本不下发规则**
+ *   （`GET /run-rules/current` 返回 `{code:200,message:"成功"}`，连 data 都没有），
+ *   此时滑杆没有可用的区间 —— 要么被禁用点不动，要么给一个编出来的范围。
+ *   里程和用时的真实来源是学校下发的规则，规则没有就应当由使用者填，
+ *   程序负责「校验 + 预演 + 拦截」，而不是假装知道区间。
  *
  * 预演（POST /api/run/plan）只在本机算，不创建会话、不发写请求，
- * 所以参数怎么调都不会产生脏数据；等到「开始跑步」才真的建会话。
+ * 所以参数怎么填都不会产生脏数据；等到「开始跑步」才真的建会话。
  */
 import { formatDuration, formatPace } from '~/utils/format'
 import type { RouteItem, RulesInfo, RunPreview } from '~/types/api'
@@ -24,8 +31,9 @@ const emit = defineEmits<{ (e: 'start', v: Record<string, unknown>): void }>()
 const { plan } = useRun()
 
 const routeId = ref<number | null>(null)
-const distanceKm = ref(0)
-const durationSec = ref(0)
+const distanceInput = ref<number | null>(null)
+const minutesInput = ref<number | null>(null)
+const secondsInput = ref<number | null>(null)
 const jitter = ref(Boolean(props.jitterDefault))
 const preview = ref<RunPreview | null>(null)
 const previewError = ref<string | null>(null)
@@ -35,9 +43,22 @@ const inited = ref(false)
 const r = computed<RulesInfo>(() => props.rules || { known: false, lines: [] })
 const hasRules = computed(() => Boolean(props.rules?.known))
 
-/** 这条里程对应的、规则允许的用时窗口（秒） */
+/** 手填的数值 → 计算值。填了才算数，不替用户猜 */
+const distanceKm = computed(() => {
+  const v = Number(distanceInput.value)
+  return Number.isFinite(v) && v > 0 ? Number(v.toFixed(2)) : 0
+})
+const durationSec = computed(() => {
+  const m = Math.max(0, Math.floor(Number(minutesInput.value) || 0))
+  const s = Math.min(59, Math.max(0, Math.floor(Number(secondsInput.value) || 0)))
+  return m * 60 + s
+})
+const paceText = computed(() =>
+  distanceKm.value > 0 && durationSec.value > 0 ? `${formatPace(durationSec.value, distanceKm.value)}/km` : '—')
+
+/** 这一档里程对应的、规则允许的用时窗口（秒）；规则没下发就是 0 ~ ∞ */
 const timeWindow = computed(() => {
-  const d = Number(distanceKm.value || 0)
+  const d = distanceKm.value
   const minT = r.value.minDurationSec ?? 0
   const maxT = r.value.maxDurationSec ?? Number.POSITIVE_INFINITY
   const minPace = r.value.minPaceSec ?? 0
@@ -48,29 +69,39 @@ const timeWindow = computed(() => {
   }
 })
 
-const windowInvalid = computed(() => !(timeWindow.value.hi > 0 && timeWindow.value.hi >= timeWindow.value.lo))
-const step = computed(() => {
-  const span = timeWindow.value.hi - timeWindow.value.lo
-  return Math.max(1, Math.min(15, Math.round(span / 40) || 1))
+/** 学校到底有没有给「用时」这件事设限（没设就别显示一个编出来的区间） */
+const hasTimeLimit = computed(() =>
+  r.value.minDurationSec != null || r.value.maxDurationSec != null
+  || r.value.minPaceSec != null || r.value.maxPaceSec != null)
+
+const windowInvalid = computed(() =>
+  hasTimeLimit.value && !(timeWindow.value.hi > 0 && timeWindow.value.hi >= timeWindow.value.lo))
+
+/** 只做**格式**校验；「是否违反学校规则」交给预演（那份才是权威） */
+const durationSecZero = computed(() => durationSec.value <= 0)
+const inputIssues = computed(() => {
+  const list: string[] = []
+  if (!(distanceKm.value > 0)) list.push('里程请填一个大于 0 的数字')
+  if (durationSecZero.value) list.push('用时请填「分」或「秒」')
+  else if (durationSec.value < 60) list.push('用时至少 1 分钟')
+  return list
 })
 
-const paceText = computed(() => formatPace(durationSec.value, distanceKm.value))
-
-const distanceItems = computed(() => {
-  const range = r.value.distanceRange
-  if (!range) return { min: 0.5, max: 20, step: 0.1 }
-  return { min: range.minKm, max: range.maxKm, step: 0.1 }
+/** 低于已知的最低里程时给一句提示（学校规则 / 达标标准推导都算） */
+const belowMinKm = computed(() => {
+  const minKm = r.value.minDistanceKm
+  if (minKm == null || !(distanceKm.value > 0)) return null
+  return distanceKm.value + 1e-9 < minKm ? minKm : null
 })
 
-/** 规则的推荐上限是否真的比硬上限更低（低了才值得提示一句） */
-const recommendMax = computed(() => {
-  const range = r.value.distanceRange
-  if (!range || range.recommendMaxKm >= range.maxKm) return null
-  return range.recommendMaxKm
+const minKmHint = computed(() => {
+  const minKm = r.value.minDistanceKm
+  if (minKm == null) return null
+  return { minKm, from: r.value.derived ? '本学期达标标准推导' : '学校下发规则' }
 })
 
 async function runPreview() {
-  if (!routeId.value || !hasRules.value) return
+  if (!routeId.value || distanceKm.value <= 0 || durationSec.value <= 0) return
   previewing.value = true
   previewError.value = null
   try {
@@ -80,9 +111,10 @@ async function runPreview() {
       durationSec: durationSec.value,
       jitter: jitter.value,
     })
-    // 服务端会按规则把参数夹进合法区间，用它回填，保证「显示的就是要发的」
-    if (preview.value?.distanceKm) distanceKm.value = preview.value.distanceKm
-    if (preview.value?.durationSec) durationSec.value = preview.value.durationSec
+    // ⚠️ 不回填用户填的数值：手填的就是要发的（服务端只会四舍五入到 2 位小数）
+    if (preview.value?.distanceKm && Math.abs(preview.value.distanceKm - distanceKm.value) > 0.02) {
+      distanceInput.value = preview.value.distanceKm
+    }
   } catch (e) {
     previewError.value = (e as Error).message
     preview.value = null
@@ -97,18 +129,28 @@ function schedulePreview() {
   debounce = setTimeout(runPreview, 350)
 }
 
-/** 首次进来：让服务端按规则挑一组默认参数（而不是前端写死 3km/12分钟） */
+/**
+ * 首次进来：路线选第一条，里程/用时给一组**保守默认值**（用户随时改）。
+ * 默认里程优先用已知下限（学校规则或达标标准推导），没有就用 2km；
+ * 默认用时按 6'00"/km 折算。
+ */
 async function init() {
-  if (inited.value || !props.routes.length || !hasRules.value) return
+  if (inited.value || !props.routes.length) return
   inited.value = true
   routeId.value = props.defaultRouteId && props.routes.some(x => x.id === props.defaultRouteId)
     ? props.defaultRouteId
     : props.routes[0].id
+  if (distanceInput.value == null) distanceInput.value = r.value.minDistanceKm ?? 2
+  if (minutesInput.value == null && secondsInput.value == null) {
+    const sec = Math.round(distanceKm.value * 360) // 6'00"/km
+    minutesInput.value = Math.floor(sec / 60)
+    secondsInput.value = sec % 60
+  }
   await runPreview()
 }
 
-watch(() => [props.routes.length, hasRules.value], init)
-watch([routeId, distanceKm, durationSec, jitter], () => {
+watch(() => props.routes.length, init)
+watch([routeId, distanceInput, minutesInput, secondsInput, jitter], () => {
   if (inited.value) schedulePreview()
 })
 
@@ -116,7 +158,8 @@ const routeLabel = (rt: RouteItem) =>
   `${rt.name} · ${rt.checkpointCount} 个打卡点${rt.startLatitude ? '' : '（无起点坐标）'}`
 
 const canStart = computed(() =>
-  Boolean(preview.value?.ok) && !windowInvalid.value && !props.busy && Boolean(routeId.value))
+  Boolean(preview.value?.ok) && !windowInvalid.value && !props.busy
+  && Boolean(routeId.value) && distanceKm.value > 0 && durationSec.value > 0)
 
 function start() {
   emit('start', {
@@ -162,69 +205,110 @@ function start() {
 
     <VCard class="mb-4">
       <VCardTitle class="text-subtitle-1">
-        <VIcon start icon="mdi-tune" />2. 定里程与用时
+        <VIcon start icon="mdi-tune" />2. 填里程与用时
       </VCardTitle>
       <VCardText>
-        <div class="mb-2 d-flex align-center">
-          <span class="text-body-2">里程</span>
-          <VSpacer />
-          <span class="text-h6">{{ Number(distanceKm || 0).toFixed(2) }} km</span>
-        </div>
-        <VSlider
-          v-model="distanceKm"
-          :min="distanceItems.min"
-          :max="distanceItems.max"
-          :step="distanceItems.step"
-          :disabled="!hasRules"
-          thumb-label
-          color="primary"
-          hide-details
+        <VAlert
+          v-if="!hasRules"
+          type="info"
+          variant="tonal"
+          density="compact"
+          class="mb-4"
         >
-          <template #thumb-label="{ modelValue }">
-            {{ Number(modelValue).toFixed(1) }}km
+          学校没有下发跑步规则，里程与用时由你填（默认给了一组保守值）。
+          程序仍会在提交前算出轨迹、复算打卡点，并按已知的达标标准提醒你是否偏短。
+        </VAlert>
+        <VRow dense>
+          <VCol cols="12" sm="5">
+            <VTextField
+              v-model.number="distanceInput"
+              type="number"
+              label="里程"
+              suffix="km"
+              variant="outlined"
+              density="comfortable"
+              :min="0.1"
+              :max="50"
+              step="0.01"
+              hide-details="auto"
+              placeholder="例如 2.00"
+            />
+            <div class="text-caption text-medium-emphasis mt-1">
+              <template v-if="minKmHint">
+                已知下限 {{ minKmHint.minKm }} km（{{ minKmHint.from }}）
+              </template>
+              <template v-else>学校未下发里程要求，按需填写</template>
+            </div>
+          </VCol>
+          <VCol cols="6" sm="3">
+            <VTextField
+              v-model.number="minutesInput"
+              type="number"
+              label="用时"
+              suffix="分"
+              variant="outlined"
+              density="comfortable"
+              :min="0"
+              :max="600"
+              step="1"
+              hide-details="auto"
+              placeholder="12"
+            />
+          </VCol>
+          <VCol cols="6" sm="2">
+            <VTextField
+              v-model.number="secondsInput"
+              type="number"
+              label=" "
+              suffix="秒"
+              variant="outlined"
+              density="comfortable"
+              :min="0"
+              :max="59"
+              step="1"
+              hide-details="auto"
+              placeholder="0"
+            />
+          </VCol>
+          <VCol cols="12" sm="2" class="d-flex align-center">
+            <VChip size="small" variant="tonal" color="secondary">
+              配速 {{ paceText }}
+            </VChip>
+          </VCol>
+        </VRow>
+
+        <div class="text-caption text-medium-emphasis mt-2">
+          <template v-if="hasTimeLimit && !windowInvalid">
+            学校允许的用时：{{ formatDuration(timeWindow.lo) }} ~ {{ formatDuration(timeWindow.hi) }}
           </template>
-        </VSlider>
-        <div class="d-flex text-caption text-medium-emphasis mt-1">
-          <span>{{ distanceItems.min }} km</span>
-          <VSpacer />
-          <span v-if="recommendMax">
-            按正常慢跑配速，建议不超过 {{ recommendMax.toFixed(1) }} km
-          </span>
-          <span v-else>{{ distanceItems.max }} km</span>
+          <template v-else-if="windowInvalid">
+            这个里程在当前规则下凑不出合法用时，请调整里程或用时。
+          </template>
+          <template v-else>
+            学校未下发用时限制，程序提交前仍会做轨迹体检与打卡点复算。
+          </template>
         </div>
 
-        <VDivider class="my-4" />
-
-        <div class="mb-2 d-flex align-center">
-          <span class="text-body-2">用时</span>
-          <VSpacer />
-          <span class="text-h6">{{ formatDuration(durationSec) }}</span>
-          <VChip size="small" variant="tonal" color="secondary" class="ml-3">
-            配速 {{ paceText }}/km
-          </VChip>
-        </div>
-        <VSlider
-          v-model="durationSec"
-          :min="Math.round(timeWindow.lo)"
-          :max="Math.round(timeWindow.hi)"
-          :step="step"
-          :disabled="!hasRules || windowInvalid"
-          thumb-label
-          color="secondary"
-          hide-details
+        <VAlert
+          v-for="msg in inputIssues"
+          :key="msg"
+          type="warning"
+          variant="tonal"
+          density="compact"
+          class="mt-3"
         >
-          <template #thumb-label="{ modelValue }">
-            {{ formatDuration(Number(modelValue)) }}
-          </template>
-        </VSlider>
-        <div class="d-flex text-caption text-medium-emphasis mt-1">
-          <span>{{ formatDuration(timeWindow.lo) }}</span>
-          <VSpacer />
-          <span>{{ formatDuration(timeWindow.hi) }}</span>
-        </div>
-        <p class="text-caption text-medium-emphasis mt-2 mb-0">
-          滑杆两端就是学校允许的用时范围：超出上限的记录会被判无效，低于下限也一样。
-        </p>
+          {{ msg }}
+        </VAlert>
+        <VAlert
+          v-if="belowMinKm"
+          type="warning"
+          variant="tonal"
+          density="compact"
+          class="mt-3"
+        >
+          里程 {{ distanceKm.toFixed(2) }} km 低于{{ r.derived ? '本学期达标标准' : '学校要求' }}的
+          {{ belowMinKm }} km，这条记录可能不计入有效次数。
+        </VAlert>
 
         <VDivider class="my-4" />
 
@@ -258,6 +342,18 @@ function start() {
         </VAlert>
 
         <template v-else-if="preview">
+          <VAlert
+            v-if="preview.issues?.length"
+            type="warning"
+            variant="tonal"
+            density="compact"
+            class="mb-3"
+          >
+            <div class="font-weight-medium mb-1">按服务端规则算下来有问题：</div>
+            <ul class="rule-lines mb-0">
+              <li v-for="i in preview.issues" :key="i.code">{{ i.text }}</li>
+            </ul>
+          </VAlert>
           <VRow>
             <VCol cols="12" sm="7">
               <VList density="compact" class="py-0">
@@ -327,7 +423,7 @@ function start() {
         </template>
 
         <div v-else class="text-caption text-medium-emphasis">
-          选好跑道与参数后，这里会先算一遍轨迹会发生什么。
+          选好跑道、填好里程与用时后，这里会先算一遍轨迹会发生什么。
         </div>
       </VCardText>
     </VCard>
@@ -352,7 +448,7 @@ function start() {
       prepend-icon="mdi-run-fast"
       @click="start"
     >
-      {{ demo ? '开始演练' : '开始跑步' }}（{{ Number(distanceKm || 0).toFixed(1) }} km / {{ formatDuration(durationSec) }}）
+      {{ demo ? '开始演练' : '开始跑步' }}（{{ distanceKm.toFixed(1) }} km / {{ formatDuration(durationSec) }}）
     </VBtn>
     <p v-if="!canStart && !busy" class="text-caption text-medium-emphasis text-center mt-2">
       预演通过后才能开始。

@@ -17,7 +17,7 @@ import { getDeviceIdentity } from './device.mjs';
 import crypto from 'node:crypto';
 
 /**
- * ============================ 请求签名（v29 起）============================
+ * ======================== 请求签名（小程序 v29 起，v30 复核） ========================
  *
  * 小程序 2026-09 更新到 v29 后，服务端对**三个写接口**开始强制校验签名，
  * 不带签名的请求会返回 `code:403 请求校验失败，请更新小程序后重试`：
@@ -26,23 +26,47 @@ import crypto from 'node:crypto';
  *   POST /runs/sessions/start           校园跑建会话
  *   POST /runs/sessions/{id}/finish     校园跑提交
  *
- * 算法（从 v29 的 app-service.js 复刻，已实测通过）：
+ * 算法（从 v29 的 app-service.js 复刻；v30 解包后导出名恢复可读，已逐行复核 —— 与 v29 完全一致）：
  *
  *   timestamp = 秒级时间戳（字符串）
  *   nonce     = 16 个随机字节 → 32 位小写 hex
  *   canonical = ["v1", 方法大写, 路径, timestamp, nonce,
  *                sha256hex(token), sha256hex(deviceId), sha256hex(bodyString)]
  *               .join("\n") + "\n"
- *   sign      = hmacSHA256hex(key = SIGN_KEY, message = canonical)
+ *   sign      = hmacSHA256hex(key = RUN_SIGN_KEY, message = canonical)
  *
  * 三个头：sunshine-run-timestamp / sunshine-run-nonce / sunshine-run-sign
  *
  * ⚠️ bodyString 必须是**实际发出去的那份 JSON 字符串**（先序列化、再用同一个字符串去算签名）。
+ *
+ * ---- v30 出处（out-v30/app-service.js，模块 730，可读名） ----
+ *
+ *   function requiresRunSign(t,n){return"POST"===t.toUpperCase()&&("/runs"===n
+ *     ||"/runs/sessions/start"===n||/^\/runs\/sessions\/[0-9]+\/finish$/.test(n))}
+ *
+ *   function calculateRunSign(t,n,e,r,o,i,u,a){          // t=key n=method e=url
+ *     var c=["v1",n.toUpperCase(),e,i,u,(0,f.sha256)(r),(0,f.sha256)(o),(0,f.sha256)(a)]
+ *       .join("\n")+"\n";                                // r/o/a 见下面调用点
+ *     return f.sha256.hmac(t,c)}
+ *
+ *   createRunSignHeaders(method,url,token,deviceId,bodyString)
+ *     → {"sunshine-run-timestamp":ts,"sunshine-run-nonce":nonce,
+ *        "sunshine-run-sign":calculateRunSign(KEY,method,url,token,deviceId,ts,nonce,bodyString)}
+ *
+ * 调用点（模块 722 `request`，同样是可读名）确定了 r/o/a 的顺序：
+ *
+ *   k = await createRunSignHeaders(u=e.method, e=e.url, g=token, E.deviceId, P=bodyString)
+ *
+ * 即 canonical 末三行 = sha256(**token**) / sha256(**deviceId**) / sha256(**body**)。
+ * （2026-10-07 更正：`wxapkg-unpack/SIGNING-v29.md` 早期把这三项写成 BODY/DEVICE_ID/DEVICE_FP，
+ *  那是误读；本文件与 v29/v30 两版小程序源码一致，服务端实测也走这条。）
+ *
+ * 密钥 v30 未轮换：与 v29 同一把（sha256 指纹 078bc15652eb6267），位置从偏移 126594 移到 286104。
  */
-const SIGN_KEY = '11b88c5d08744fdcba39ae5727fd689c7b08bac9876353e79ec223441fb24ea3';
+export const RUN_SIGN_KEY = '11b88c5d08744fdcba39ae5727fd689c7b08bac9876353e79ec223441fb24ea3';
 
-/** 哪些请求需要签名（照抄 v29 的判定） */
-function needsSignature(method, url) {
+/** 哪些请求需要签名 —— 照抄 v30 的 `requiresRunSign`（与 v29 的 `C` 逐字等价） */
+export function requiresRunSign(method, url) {
   return String(method).toUpperCase() === 'POST'
     && (url === '/runs'
       || url === '/runs/sessions/start'
@@ -52,25 +76,40 @@ function needsSignature(method, url) {
 const sha256hex = (s) => crypto.createHash('sha256').update(String(s), 'utf8').digest('hex');
 const hmacHex = (key, msg) => crypto.createHmac('sha256', key).update(msg, 'utf8').digest('hex');
 
-/** 生成三个签名头 */
-export function signHeaders({ method, url, token, deviceId, bodyString }) {
-  const timestamp = String(Math.floor(Date.now() / 1000));
-  const nonce = crypto.randomBytes(16).toString('hex');
-  const canonical = [
+/**
+ * 拼出待签名的 canonical 串（8 行 + 末尾一个 \n）。
+ * 单独导出是为了让 selftest 能逐字节断言，而不是只测"结果看起来像 hex"。
+ *
+ * @param {{method:string,url:string,token?:string,deviceId?:string,timestamp:string,nonce:string,bodyString?:string}} o
+ */
+export function canonicalString({ method, url, token, deviceId, timestamp, nonce, bodyString }) {
+  return [
     'v1',
     String(method).toUpperCase(),
     url,
-    timestamp,
-    nonce,
+    String(timestamp),
+    String(nonce),
     sha256hex(token || ''),
     sha256hex(deviceId || ''),
     sha256hex(bodyString || ''),
   ].join('\n') + '\n';
+}
+
+/**
+ * 生成三个签名头。
+ * @param {{method:string,url:string,token?:string,deviceId?:string,bodyString?:string,
+ *          timestamp?:string,nonce?:string,key?:string}} o
+ *        timestamp / nonce / key 可注入，仅测试用；生产走默认值。
+ */
+export function signHeaders({ method, url, token, deviceId, bodyString, timestamp, nonce, key }) {
+  const ts = timestamp != null ? String(timestamp) : String(Math.floor(Date.now() / 1000));
+  const n = nonce != null ? String(nonce) : crypto.randomBytes(16).toString('hex');
+  const canonical = canonicalString({ method, url, token, deviceId, timestamp: ts, nonce: n, bodyString });
 
   return {
-    'sunshine-run-timestamp': timestamp,
-    'sunshine-run-nonce': nonce,
-    'sunshine-run-sign': hmacHex(SIGN_KEY, canonical),
+    'sunshine-run-timestamp': ts,
+    'sunshine-run-nonce': n,
+    'sunshine-run-sign': hmacHex(key || RUN_SIGN_KEY, canonical),
   };
 }
 
@@ -164,7 +203,7 @@ export function createClient(opts = {}) {
 
       // v29 起：三个写接口必须带签名（用**实际发出去的那份 body 字符串**去算）
       let sign = {};
-      if (needsSignature(method, url)) {
+      if (requiresRunSign(method, url)) {
         if (token && did) {
           sign = signHeaders({ method, url, token, deviceId: did, bodyString: body });
         } else {
